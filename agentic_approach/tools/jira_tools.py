@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 import asyncio
 
 from langchain_core.tools import Tool
 
-from jira_client import create_jira_issue, update_jira_issue
+from jira_client import (
+    create_jira_issue,
+    update_jira_issue,
+    resolve_account_id as _jira_resolve_account_id,
+    get_active_issues as _jira_get_active_issues,
+)
 from agentic_approach.config import CONFIG
 
 
@@ -67,6 +72,23 @@ async def update_jira_task(issue_key: str, fields: Dict[str, Any]) -> bool:
     )
 
 
+async def resolve_jira_account(display_name: str) -> Optional[str]:
+    """
+    Look up a Jira user by display name or email fragment and return
+    their accountId, or None if no match is found.
+    """
+    if not display_name:
+        return None
+    return await _jira_resolve_account_id(display_name)
+
+
+async def get_active_issues_agent(room_id: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Thin wrapper around jira_client.get_active_issues, exposed for tools
+    and for the agent to use when deciding create vs update.
+    """
+    return await _jira_get_active_issues(room_id)
+
 def _create_jira_task_sync(fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Synchronous wrapper for create_jira_task, for LangChain tool compatibility.
@@ -85,6 +107,20 @@ def _update_jira_task_sync(issue_key: str, fields: Dict[str, Any]) -> bool:
     In async contexts, prefer the coroutine version exposed via Tool.coroutine.
     """
     return asyncio.run(update_jira_task(issue_key, fields))
+
+
+def _resolve_jira_account_sync(display_name: str) -> Optional[str]:
+    """
+    Synchronous wrapper for resolve_jira_account, for LangChain tools.
+    """
+    return asyncio.run(resolve_jira_account(display_name))
+
+
+def _get_active_issues_sync(room_id: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Synchronous wrapper for get_active_issues_agent, for LangChain tools.
+    """
+    return asyncio.run(get_active_issues_agent(room_id))
 
 
 CREATE_JIRA_TASK_TOOL: Tool = Tool(
@@ -108,4 +144,27 @@ UPDATE_JIRA_TASK_TOOL: Tool = Tool(
     func=_update_jira_task_sync,
     coroutine=update_jira_task,
 )
+
+
+RESOLVE_ACCOUNT_ID_TOOL: Tool = Tool(
+    name="resolve_jira_account",
+    description=(
+        "Resolve a Jira user accountId from a display name or email fragment. "
+        "Returns the accountId string or null if not found."
+    ),
+    func=_resolve_jira_account_sync,
+    coroutine=resolve_jira_account,
+)
+
+
+GET_ACTIVE_ISSUES_TOOL: Tool = Tool(
+    name="get_active_issues",
+    description=(
+        "Fetch open Jira issues for the configured project. Returns a list of "
+        "objects with keys: key, title, description, assigned_to, deadline, status."
+    ),
+    func=_get_active_issues_sync,
+    coroutine=get_active_issues_agent,
+)
+
 

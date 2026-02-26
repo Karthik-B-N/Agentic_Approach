@@ -21,8 +21,11 @@ from agentic_approach.tools.summarization import (
 from agentic_approach.tools.jira_tools import (
     CREATE_JIRA_TASK_TOOL,
     UPDATE_JIRA_TASK_TOOL,
+    RESOLVE_ACCOUNT_ID_TOOL,
+    GET_ACTIVE_ISSUES_TOOL,
     create_jira_task,
     update_jira_task,
+    get_active_issues_agent,
 )
 from helpers import safe_parse_deadline
 from matrix_sender import send_message_reply
@@ -34,6 +37,8 @@ AGENT_TOOLS = [
     SUMMARIZE_CONVERSATION_TOOL,
     CREATE_JIRA_TASK_TOOL,
     UPDATE_JIRA_TASK_TOOL,
+    RESOLVE_ACCOUNT_ID_TOOL,
+    GET_ACTIVE_ISSUES_TOOL,
 ]
 
 
@@ -278,7 +283,7 @@ async def handle_message(
         return
 
     # --- Step 1: Classification (hard gate) ---
-    cls = classify_message(message_text)
+    cls = classify_message(message_text, room_id=room_id)
     if not cls["is_task_related"] or cls["intent"] == "none":
         # STRICT: never respond, never summarize, never call Jira.
         return
@@ -292,8 +297,26 @@ async def handle_message(
     structured_summary = summary_result.get("summary") or ""
     entities = summary_result.get("entities") or {}
 
+    # --- Step 2b: Fetch active Jira issues to avoid duplicates / support updates ---
+    active_issues_raw = await get_active_issues_agent(room_id)
+    # Keep only compact fields to reduce token usage.
+    active_issues = [
+        {"key": issue["key"], "title": issue["title"], "status": issue["status"]}
+        for issue in active_issues_raw
+    ]
+
     # --- Step 3: Decide action via LangChain ChatGroq ---
     system_prompt = TASK_DETECTION_SYSTEM_PROMPT.strip()
+
+    # Simple hint extraction for assignee and Jira keys, to help the model.
+    import re
+
+    assignee_hint = None
+    m = re.search(r"@([A-Za-z0-9_.-]+)", message_text)
+    if m:
+        assignee_hint = m.group(1)
+
+    jira_keys_in_message = re.findall(r"\b[A-Z][A-Z0-9]+-\d+\b", message_text)
 
     payload = {
         "current_message": message_text,
@@ -301,6 +324,9 @@ async def handle_message(
         "classification_confidence": cls["confidence"],
         "conversation_summary": structured_summary,
         "entities": entities,
+        "active_issues": active_issues,
+        "assignee_hint": assignee_hint,
+        "mentioned_jira_keys": jira_keys_in_message,
     }
 
     user_prompt = f"""
@@ -325,11 +351,19 @@ async def handle_message(
         - For update_task, required field is: jira_key.
         - For request_missing_information, you MUST list only the missing fields in missing_fields
         and provide a single concise clarification_message to send to the room.
-        - Never invent Jira keys or project keys; use only what appears in the message or summary.
+- Never invent Jira keys or project keys; use only what appears in the message, summary,
+  or in the provided active_issues list.
+- Use active_issues and mentioned_jira_keys to decide between create vs update:
+  - If the user clearly refers to an existing Jira key (e.g. \"PROJ-123\"), set
+    action = \"update_task\" and jira_key to that value.
+  - If the requested task title closely matches an existing active issue title,
+    prefer action = \"update_task\" instead of creating a duplicate.
+- When a clear assignee_hint or entities[\"assignee\"] is provided, set the
+  assignee field to that value.
 
         Input:
         {payload}
-"""
+    """
     llm = ChatGroq(
         api_key=os.getenv("GROQ_API_KEY"),
         model_name=CONFIG.groq_model,

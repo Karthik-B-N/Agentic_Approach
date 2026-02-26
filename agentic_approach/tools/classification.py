@@ -7,6 +7,7 @@ import os
 from langchain_core.tools import Tool
 
 from agentic_approach.config import CONFIG
+from agentic_approach.tools.summarization import _load_room_messages
 
 
 class ClassificationResult(TypedDict):
@@ -25,7 +26,7 @@ def _get_client() -> Groq:
     return _groq_client
 
 
-def classify_message(message: str) -> ClassificationResult:
+def classify_message(message: str, room_id: str | None = None) -> ClassificationResult:
     """
     Classify a single message as task-related or not.
 
@@ -41,29 +42,38 @@ def classify_message(message: str) -> ClassificationResult:
         }
 
     system_prompt = """
-You are a strict classifier that decides whether a single chat message
-is about Jira-style task management.
+You are a HIGH-PRECISION classifier that decides whether a chat message
+and its recent context are about Jira-style task management.
 
-You must answer in STRICT JSON:
+Answer in STRICT JSON:
 {
   "is_task_related": true | false,
   "intent": "create_task" | "update_task" | "none",
   "confidence": 0.0-1.0
 }
 
-Consider as task-related when you see:
-- Explicit instructions to create work items
-- Implicit commitments like "I'll handle X"
-- Status changes (done / blocked / in progress)
-- Deadlines or due dates
-- Assignments (who should do what)
-- Mentions of Jira issue keys like PROJ-123
+Only mark a message as task-related when it CLEARLY:
+- Asks to create a new work item, or
+- Requests a change to an existing Jira issue, or
+- Explicitly assigns work with a concrete action and scope.
 
-If you are not clearly confident (>= 0.7) that it is task-related,
-set is_task_related = false, intent = "none", and confidence <= 0.69.
+Do NOT treat vague chatter, greetings, or general discussion as task-related,
+even if they mention projects or people.
+
+If you are NOT clearly confident (>= 0.8) that it is task-related,
+then set:
+  "is_task_related": false,
+  "intent": "none",
+  "confidence": a value < 0.8.
 """
 
-    user_content = f"Message:\n{message}"
+    context_block = ""
+    if room_id:
+        transcript = _load_room_messages(room_id, CONFIG.last_n_messages)
+        if transcript.strip():
+            context_block = f"\n\nRecent messages in this room:\n{transcript}"
+
+    user_content = f"Message:\n{message}{context_block}"
 
     client = _get_client()
     completion = client.chat.completions.create(
